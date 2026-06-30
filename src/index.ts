@@ -469,6 +469,110 @@ server.tool(
   }
 );
 
+// ── compare_colleges ─────────────────────────────────────────────────────────
+
+server.tool(
+  "compare_colleges",
+  "Side-by-side comparison of 2–5 colleges across admissions, cost, financial aid, and outcomes. Takes a list of school names and returns a structured table so you don't have to call get_college_details multiple times and mentally line them up.",
+  {
+    schools: z
+      .array(z.string())
+      .min(2)
+      .max(5)
+      .describe("List of 2–5 school names to compare, e.g. ['MIT', 'Stanford', 'Georgia Tech', 'University of Washington']"),
+  },
+  async ({ schools }) => {
+    if (!SCORECARD_API_KEY) {
+      return {
+        content: [{ type: "text", text: "Missing COLLEGE_SCORECARD_API_KEY. Get a free key at https://api.data.gov/signup/" }],
+      };
+    }
+
+    // Fetch best match for each school name in parallel
+    const allResults = await Promise.all(
+      schools.map((name) => fetchSchoolsByName(name, SCORECARD_API_KEY, 1))
+    );
+
+    // Pair each queried name with its result (or null if not found)
+    const matched: { queried: string; school: SchoolRecord | null }[] = schools.map((name, i) => ({
+      queried: name,
+      school: allResults[i][0] ?? null,
+    }));
+
+    const found = matched.filter((m) => m.school !== null);
+    const missing = matched.filter((m) => m.school === null).map((m) => m.queried);
+
+    if (found.length === 0) {
+      return { content: [{ type: "text", text: `No schools found for any of: ${schools.join(", ")}` }] };
+    }
+
+    const g = (school: SchoolRecord, key: string) => school[key] ?? null;
+
+    // Helper: SAT composite range string
+    function satRange(s: SchoolRecord): string {
+      const m25 = g(s, "latest.admissions.sat_scores.25th_percentile.math");
+      const m75 = g(s, "latest.admissions.sat_scores.75th_percentile.math");
+      const r25 = g(s, "latest.admissions.sat_scores.25th_percentile.critical_reading");
+      const r75 = g(s, "latest.admissions.sat_scores.75th_percentile.critical_reading");
+      if (m25 == null || r25 == null) return "N/A";
+      return `${Number(m25) + Number(r25)}–${Number(m75!) + Number(r75!)}`;
+    }
+
+    // Build table: rows are metrics, columns are schools
+    const headers = found.map((m) => String(g(m.school!, "school.name") ?? m.queried));
+
+    function row(label: string, values: string[]): string {
+      return `| ${label} | ${values.join(" | ")} |`;
+    }
+
+    const sep = `| --- | ${found.map(() => "---").join(" | ")} |`;
+
+    const table = [
+      `| | ${headers.join(" | ")} |`,
+      sep,
+
+      // Overview
+      row("**Location**",        found.map((m) => `${g(m.school!, "school.city")}, ${g(m.school!, "school.state")}`)),
+      row("**Type**",            found.map((m) => decodeOwnership(g(m.school!, "school.ownership") as number))),
+      row("**Classification**",  found.map((m) => decodeCarnegie(g(m.school!, "school.carnegie_basic") as number))),
+      row("**Enrollment**",      found.map((m) => g(m.school!, "latest.student.size") != null ? Number(g(m.school!, "latest.student.size")).toLocaleString() : "N/A")),
+
+      // Admissions
+      row("**Acceptance rate**", found.map((m) => fmtPct(g(m.school!, "latest.admissions.admission_rate.overall") as number))),
+      row("**SAT range**",       found.map((m) => satRange(m.school!))),
+      row("**ACT range**",       found.map((m) => {
+        const lo = g(m.school!, "latest.admissions.act_scores.25th_percentile.cumulative");
+        const hi = g(m.school!, "latest.admissions.act_scores.75th_percentile.cumulative");
+        return lo != null ? `${lo}–${hi}` : "N/A";
+      })),
+
+      // Cost
+      row("**In-state tuition**",    found.map((m) => fmt(g(m.school!, "latest.cost.tuition.in_state") as number))),
+      row("**Out-of-state tuition**", found.map((m) => fmt(g(m.school!, "latest.cost.tuition.out_of_state") as number))),
+      row("**Avg net price**",       found.map((m) => fmt(g(m.school!, "latest.cost.avg_net_price.consumer.overall_median") as number))),
+      row("**Net price ≤$30k fam.**", found.map((m) => fmt(g(m.school!, "latest.cost.net_price.consumer.by_income_level.0-30000") as number))),
+      row("**Net price $75–110k fam.**", found.map((m) => fmt(g(m.school!, "latest.cost.net_price.consumer.by_income_level.75001-110000") as number))),
+      row("**Net price $110k+ fam.**", found.map((m) => fmt(g(m.school!, "latest.cost.net_price.consumer.by_income_level.110001-plus") as number))),
+
+      // Aid & debt
+      row("**Median debt**",     found.map((m) => fmt(g(m.school!, "latest.aid.median_debt.completers.overall") as number))),
+      row("**Pell grant rate**", found.map((m) => fmtPct(g(m.school!, "latest.aid.pell_grant_rate") as number))),
+
+      // Outcomes
+      row("**4-yr grad rate**",  found.map((m) => fmtPct(g(m.school!, "latest.completion.completion_rate_4yr_150nt") as number))),
+      row("**1-yr retention**",  found.map((m) => fmtPct(g(m.school!, "latest.student.retention_rate.four_year.full_time") as number))),
+      row("**10-yr earnings**",  found.map((m) => fmt(g(m.school!, "latest.earnings.10_yrs_after_entry.median") as number))),
+      row("**First-gen students**", found.map((m) => fmtPct(g(m.school!, "latest.student.demographics.first_generation") as number))),
+    ].join("\n");
+
+    const notFoundNote = missing.length > 0
+      ? `\n\n> Could not find data for: ${missing.join(", ")}. Try more specific names.`
+      : "";
+
+    return { content: [{ type: "text", text: table + notFoundNote }] };
+  }
+);
+
 // ── get_college_details ───────────────────────────────────────────────────────
 
 server.tool(
