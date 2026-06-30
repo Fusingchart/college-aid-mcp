@@ -25,6 +25,17 @@ export function decodeCarnegie(code) {
     };
     return map[code ?? -1] ?? "Other";
 }
+// Adjacent Carnegie tiers to broaden search when exact tier returns too few results
+export const CARNEGIE_ADJACENT = {
+    15: [15, 16], // R1 → also R2
+    16: [16, 15, 17], // R2 → also R1, R3
+    17: [17, 16, 18], // R3 → also R2, M1
+    18: [18, 19, 17], // Master's Large → also M-Medium, R3
+    19: [19, 18, 20], // Master's Medium → also M-Large, M-Small
+    20: [20, 19, 21], // Master's Small → also M-Medium, Bacc A&S
+    21: [21, 22, 20], // Bacc A&S → also Bacc Diverse, M-Small
+    22: [22, 21, 23], // Bacc Diverse → also Bacc A&S, Mixed
+};
 export function fmt(n, prefix = "$") {
     if (n == null)
         return "N/A";
