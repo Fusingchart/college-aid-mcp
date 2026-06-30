@@ -13,6 +13,12 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 
 **`search_scholarships`** — search 9,500+ scholarships and grants. Filter by keyword, state, study level. Returns award amount, deadline, provider, and direct link.
 
+**`estimate_loan_repayment`** — pure computation, no API key needed. Given a loan balance and expected salary, calculates:
+- Standard 10-year plan: monthly payment, total interest
+- Extended 25-year plan: lower monthly cost, higher total interest
+- Income-driven repayment (IDR): payment as % of discretionary income, forgiveness after 20 years if balance remains
+- Debt-to-income health check and a recommendation on which plan makes sense
+
 **`get_college_details`** — deep dive on a single school. Returns:
 - Net price broken down by family income bracket ($0–30k, $30–48k, $48–75k, $75–110k, $110k+)
 - SAT/ACT score ranges (25th–75th percentile)
@@ -35,6 +41,8 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 - *"Show me mechanical engineering programs sorted by lowest debt in the midwest."*
 - *"Get full details for Georgia Tech — what would I actually pay if my family earns $60k/year?"*
 - *"Compare Georgia Tech and Carnegie Mellon on net price, SAT ranges, and 10-year earnings."*
+- *"I'll graduate with $28k in debt and expect to earn $55k — show me my repayment options."*
+- *"Find CS programs in California sorted by lowest debt, then estimate repayment for the top school."*
 
 ---
 
