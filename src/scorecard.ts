@@ -31,6 +31,17 @@ export const DETAIL_FIELDS = [
 
 export type SchoolRecord = Record<string, unknown>;
 
+const SIMILAR_FIELDS = [
+  "school.name", "school.city", "school.state",
+  "school.ownership", "school.carnegie_basic",
+  "latest.admissions.admission_rate.overall",
+  "latest.cost.tuition.in_state",
+  "latest.cost.avg_net_price.consumer.overall_median",
+  "latest.aid.median_debt.completers.overall",
+  "latest.completion.completion_rate_4yr_150nt",
+  "latest.earnings.10_yrs_after_entry.median",
+].join(",");
+
 export async function fetchSchoolsByName(
   name: string,
   apiKey: string,
@@ -46,4 +57,38 @@ export async function fetchSchoolsByName(
   if (!res.ok) return [];
   const data = (await res.json()) as { results?: SchoolRecord[] };
   return data.results ?? [];
+}
+
+export async function fetchSimilarSchools(opts: {
+  apiKey: string;
+  admitRateMin: number;
+  admitRateMax: number;
+  carnegieCode: number;
+  excludeId?: unknown;
+  sortBy: "admit_asc" | "admit_desc" | "earnings_desc" | "tuition_asc";
+  perPage: number;
+}): Promise<SchoolRecord[]> {
+  const sortMap = {
+    admit_asc:     "latest.admissions.admission_rate.overall:asc",
+    admit_desc:    "latest.admissions.admission_rate.overall:desc",
+    earnings_desc: "latest.earnings.10_yrs_after_entry.median:desc",
+    tuition_asc:   "latest.cost.tuition.in_state:asc",
+  };
+
+  const params = new URLSearchParams({
+    api_key: opts.apiKey,
+    "school.carnegie_basic": String(opts.carnegieCode),
+    "latest.admissions.admission_rate.overall__range": `${opts.admitRateMin.toFixed(4)}..${opts.admitRateMax.toFixed(4)}`,
+    fields: SIMILAR_FIELDS,
+    per_page: String(opts.perPage),
+    _sort: sortMap[opts.sortBy],
+  });
+
+  const res = await fetch(`https://api.data.gov/ed/collegescorecard/v1/schools?${params}`);
+  if (!res.ok) return [];
+  const data = (await res.json()) as { results?: SchoolRecord[] };
+  const results = data.results ?? [];
+  return opts.excludeId != null
+    ? results.filter((r) => r["id"] !== opts.excludeId && r["school.name"] !== opts.excludeId)
+    : results;
 }
