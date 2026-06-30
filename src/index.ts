@@ -302,9 +302,10 @@ server.tool(
         earningsNational: earn["4_yr"]?.["overall_median_earnings_national"] != null ? Number(earn["4_yr"]["overall_median_earnings_national"]) : null,
         p25National: earn["4_yr"]?.["overall_p25_earnings_national"] != null ? Number(earn["4_yr"]["overall_p25_earnings_national"]) : null,
         p75National: earn["4_yr"]?.["overall_p75_earnings_national"] != null ? Number(earn["4_yr"]["overall_p75_earnings_national"]) : null,
-        debt: dbt["staff_grad_plus"]?.["all"]?.["all_inst"]?.["median"] != null
-          ? Number((dbt["staff_grad_plus"]["all"]["all_inst"] as Record<string, unknown>)["median"])
-          : null,
+        debt: (() => {
+          const inst = dbt["staff_grad_plus"]?.["all"]?.["all_inst"] as Record<string, unknown> | undefined;
+          return inst?.["median"] != null ? Number(inst["median"]) : null;
+        })(),
         credentialTitle: String((match["credential"] as Record<string, unknown>)?.["title"] ?? credential_level),
       });
     }

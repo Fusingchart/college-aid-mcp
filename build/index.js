@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { lookupCip } from "./cip-codes.js";
 const SCORECARD_API_KEY = process.env.COLLEGE_SCORECARD_API_KEY ?? "";
 const CAREERONESTOP_USER_ID = process.env.CAREERONESTOP_USER_ID ?? "";
 const CAREERONESTOP_TOKEN = process.env.CAREERONESTOP_TOKEN ?? "";
@@ -171,6 +172,128 @@ server.tool("search_scholarships", "Search 9,500+ scholarships and grants from t
     });
     return {
         content: [{ type: "text", text: formatted.join("\n\n") }],
+    };
+});
+// ── search_by_major ───────────────────────────────────────────────────────────
+server.tool("search_by_major", "Compare the same major across different colleges using College Scorecard field-of-study data. Returns program-specific median earnings, median debt, and in-state tuition for each school — far more accurate than school-wide averages.", {
+    major: z.string().describe("Major or field of study, e.g. 'computer science', 'nursing', 'mechanical engineering'. Also accepts 4-digit CIP codes directly."),
+    state: z.string().optional().describe("Two-letter state code to filter schools, e.g. 'WA'"),
+    credential_level: z
+        .enum(["associate", "bachelor", "graduate"])
+        .optional()
+        .default("bachelor")
+        .describe("Degree level to compare"),
+    sort_by: z
+        .enum(["earnings", "debt", "tuition"])
+        .optional()
+        .default("earnings")
+        .describe("Sort results by highest earnings, lowest debt, or lowest tuition"),
+    limit: z.number().min(1).max(20).default(10).describe("Number of results"),
+}, async ({ major, state, credential_level, sort_by, limit }) => {
+    if (!SCORECARD_API_KEY) {
+        return {
+            content: [{ type: "text", text: "Missing COLLEGE_SCORECARD_API_KEY. Get a free key at https://api.data.gov/signup/" }],
+        };
+    }
+    const cip = lookupCip(major);
+    if (!cip) {
+        return {
+            content: [{ type: "text", text: `Unrecognized major: "${major}". Try a common name like "computer science", "nursing", "mechanical engineering", or pass a 4-digit CIP code directly.` }],
+        };
+    }
+    const credLevel = { associate: 2, bachelor: 3, graduate: 5 }[credential_level ?? "bachelor"];
+    const params = new URLSearchParams({
+        api_key: SCORECARD_API_KEY,
+        "latest.programs.cip_4_digit.code": cip.code,
+        fields: [
+            "school.name",
+            "school.state",
+            "school.city",
+            "latest.cost.tuition.in_state",
+            "latest.programs.cip_4_digit",
+        ].join(","),
+        per_page: "100",
+    });
+    if (state)
+        params.set("school.state", state);
+    const url = `https://api.data.gov/ed/collegescorecard/v1/schools?${params}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+        return {
+            content: [{ type: "text", text: `College Scorecard API error: ${res.status} ${res.statusText}` }],
+        };
+    }
+    const data = (await res.json());
+    const entries = [];
+    for (const school of data.results ?? []) {
+        const programs = school["latest.programs.cip_4_digit"];
+        if (!programs)
+            continue;
+        const match = programs.find((p) => p["code"] === cip.code && p["credential"]?.["level"] === credLevel);
+        if (!match)
+            continue;
+        const earn = match["earnings"] ?? {};
+        const dbt = match["debt"] ?? {};
+        entries.push({
+            schoolName: String(school["school.name"] ?? "Unknown"),
+            city: String(school["school.city"] ?? ""),
+            st: String(school["school.state"] ?? ""),
+            tuition: school["latest.cost.tuition.in_state"] != null ? Number(school["latest.cost.tuition.in_state"]) : null,
+            earnings4yr: earn["4_yr"]?.["overall_median_earnings"] != null ? Number(earn["4_yr"]["overall_median_earnings"]) : null,
+            earningsNational: earn["4_yr"]?.["overall_median_earnings_national"] != null ? Number(earn["4_yr"]["overall_median_earnings_national"]) : null,
+            p25National: earn["4_yr"]?.["overall_p25_earnings_national"] != null ? Number(earn["4_yr"]["overall_p25_earnings_national"]) : null,
+            p75National: earn["4_yr"]?.["overall_p75_earnings_national"] != null ? Number(earn["4_yr"]["overall_p75_earnings_national"]) : null,
+            debt: (() => {
+                const inst = dbt["staff_grad_plus"]?.["all"]?.["all_inst"];
+                return inst?.["median"] != null ? Number(inst["median"]) : null;
+            })(),
+            credentialTitle: String(match["credential"]?.["title"] ?? credential_level),
+        });
+    }
+    if (entries.length === 0) {
+        return {
+            content: [{ type: "text", text: `No ${credential_level}-level ${cip.label} programs found${state ? ` in ${state}` : ""}. Try a different credential level or broaden your search.` }],
+        };
+    }
+    // Sort
+    const sorted = [...entries].sort((a, b) => {
+        if (sort_by === "earnings") {
+            return (b.earnings4yr ?? -1) - (a.earnings4yr ?? -1);
+        }
+        else if (sort_by === "debt") {
+            if (a.debt === null)
+                return 1;
+            if (b.debt === null)
+                return -1;
+            return a.debt - b.debt;
+        }
+        else {
+            if (a.tuition === null)
+                return 1;
+            if (b.tuition === null)
+                return -1;
+            return a.tuition - b.tuition;
+        }
+    });
+    const top = sorted.slice(0, limit);
+    // National benchmark from first entry that has it
+    const benchmark = entries.find((e) => e.earningsNational != null);
+    const header = benchmark
+        ? `**${cip.label} (${top[0].credentialTitle}) — National benchmark:** median 4yr earnings $${benchmark.earningsNational.toLocaleString()} | P25 $${benchmark.p25National?.toLocaleString() ?? "N/A"} | P75 $${benchmark.p75National?.toLocaleString() ?? "N/A"}\n\n`
+        : "";
+    const rows = top.map((e, i) => {
+        const earningsStr = e.earnings4yr != null
+            ? `$${e.earnings4yr.toLocaleString()}${benchmark?.earningsNational != null ? ` (${e.earnings4yr >= benchmark.earningsNational ? "+" : ""}${Math.round((e.earnings4yr / benchmark.earningsNational - 1) * 100)}% vs national)` : ""}`
+            : "N/A";
+        return [
+            `**${i + 1}. ${e.schoolName}** — ${e.city}, ${e.st}`,
+            `  4yr median earnings: ${earningsStr}`,
+            `  Median student debt: ${e.debt != null ? `$${e.debt.toLocaleString()}` : "N/A"}`,
+            `  In-state tuition: ${e.tuition != null ? `$${e.tuition.toLocaleString()}/yr` : "N/A"}`,
+        ].join("\n");
+    });
+    return {
+        content: [{ type: "text", text: header + rows.join("\n\n") }],
     };
 });
 // ── Start ─────────────────────────────────────────────────────────────────────
