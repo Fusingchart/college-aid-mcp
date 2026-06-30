@@ -13,6 +13,8 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 
 **`search_scholarships`** — search 9,500+ scholarships and grants. Filter by keyword, state, study level. Returns award amount, deadline, provider, and direct link.
 
+**`compare_colleges`** — side-by-side comparison table for 2–5 schools. Runs all lookups in parallel and returns a single markdown table across 18 metrics: location, type, acceptance rate, SAT/ACT ranges, in-state/out-of-state tuition, net price at 3 income brackets, median debt, Pell rate, 4-yr grad rate, retention, 10-yr earnings, and first-gen student share.
+
 **`search_careers`** — search careers by job title or keyword using CareerOneStop/O\*NET data. Returns for each occupation:
 - Annual salary percentiles (P25 / median / P75 / P90), nationally and by state
 - Bright job outlook flag (above-average growth or openings)
@@ -49,6 +51,7 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 - *"Compare Georgia Tech and Carnegie Mellon on net price, SAT ranges, and 10-year earnings."*
 - *"I'll graduate with $28k in debt and expect to earn $55k — show me my repayment options."*
 - *"Find CS programs in California sorted by lowest debt, then estimate repayment for the top school."*
+- *"Compare MIT, Stanford, Georgia Tech, and Carnegie Mellon side by side on cost, debt, and earnings."*
 - *"What do software engineers actually earn in Washington state, and which CS programs give the best shot at hitting P75 salary?"*
 - *"Compare nursing salaries in Texas vs nationally, then find nursing programs with the lowest debt."*
 
