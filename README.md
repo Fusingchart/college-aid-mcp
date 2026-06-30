@@ -13,6 +13,14 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 
 **`search_scholarships`** — search 9,500+ scholarships and grants. Filter by keyword, state, study level. Returns award amount, deadline, provider, and direct link.
 
+**`get_college_details`** — deep dive on a single school. Returns:
+- Net price broken down by family income bracket ($0–30k, $30–48k, $48–75k, $75–110k, $110k+)
+- SAT/ACT score ranges (25th–75th percentile)
+- Acceptance rate, enrollment, 1st-year retention, 4-year graduation rate
+- First-generation student share, Pell grant rate
+- Median debt at graduation and 10-year earnings
+- Institution type, Carnegie classification, locale
+
 **`search_by_major`** — compare the same major across schools using program-specific data, not school-wide averages. Supports 60+ major aliases (e.g. `"cs"`, `"nursing"`, `"mechanical engineering"`) or raw 4-digit CIP codes. Returns for each school:
 - Program-specific 4yr median earnings (vs. national benchmark for that program)
 - Program-specific median student debt
@@ -25,6 +33,8 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 - *"Find first-generation college student scholarships in California."*
 - *"Rank nursing bachelor programs in Texas by earnings — which schools beat the national median?"*
 - *"Show me mechanical engineering programs sorted by lowest debt in the midwest."*
+- *"Get full details for Georgia Tech — what would I actually pay if my family earns $60k/year?"*
+- *"Compare Georgia Tech and Carnegie Mellon on net price, SAT ranges, and 10-year earnings."*
 
 ---
 
