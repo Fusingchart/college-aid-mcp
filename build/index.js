@@ -175,6 +175,110 @@ server.tool("search_scholarships", "Search 9,500+ scholarships and grants from t
         content: [{ type: "text", text: formatted.join("\n\n") }],
     };
 });
+// ── estimate_loan_repayment ───────────────────────────────────────────────────
+// 2024 federal poverty guidelines (lower 48 + DC)
+const FPL_BASE = 15060;
+const FPL_PER_PERSON = 5380;
+function monthlyPayment(principal, annualRate, months) {
+    const r = annualRate / 12;
+    if (r === 0)
+        return principal / months;
+    return (principal * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1);
+}
+function simulateIdr(principal, annualRate, monthlyPayment, forgivenessMonths, interestSubsidy) {
+    const r = annualRate / 12;
+    let balance = principal;
+    let totalPaid = 0;
+    for (let month = 1; month <= forgivenessMonths; month++) {
+        const interest = balance * r;
+        const payment = Math.min(monthlyPayment, balance + interest);
+        totalPaid += payment;
+        if (interestSubsidy && monthlyPayment < interest) {
+            // Govt covers unpaid interest — balance stays flat
+        }
+        else {
+            balance = balance + interest - payment;
+        }
+        if (balance <= 0)
+            return { totalPaid, forgiven: 0, paidOffMonth: month };
+    }
+    return { totalPaid, forgiven: Math.max(0, balance), paidOffMonth: null };
+}
+server.tool("estimate_loan_repayment", "Calculate monthly payments, total interest, and payoff timeline across repayment plans (standard 10-year, extended 25-year, income-driven with forgiveness). Works standalone or pairs naturally with get_college_details and search_by_major to turn debt numbers into concrete repayment scenarios.", {
+    loan_amount: z.number().positive().describe("Total loan balance in USD (e.g. 25000)"),
+    annual_income: z.number().positive().describe("Expected annual gross income in USD after graduation — used for income-driven repayment calculation"),
+    interest_rate: z.number().min(0).max(20).default(6.53).describe("Annual interest rate as a percentage (default: 6.53%, the 2024–25 federal undergraduate rate)"),
+    household_size: z.number().int().min(1).max(8).default(1).describe("Household size for IDR poverty line calculation (default: 1)"),
+}, async ({ loan_amount, annual_income, interest_rate, household_size }) => {
+    const rate = interest_rate / 100;
+    const povertyLine = FPL_BASE + FPL_PER_PERSON * (household_size - 1);
+    // ── Standard 10-year ──────────────────────────────────────────────────────
+    const stdMonthly = monthlyPayment(loan_amount, rate, 120);
+    const stdTotal = stdMonthly * 120;
+    const stdInterest = stdTotal - loan_amount;
+    // ── Extended 25-year ─────────────────────────────────────────────────────
+    const extMonthly = monthlyPayment(loan_amount, rate, 300);
+    const extTotal = extMonthly * 300;
+    const extInterest = extTotal - loan_amount;
+    // ── Income-driven repayment (IDR) ─────────────────────────────────────────
+    // 10% of discretionary income (income above 150% FPL), forgiveness at 20yr
+    const discretionary = Math.max(0, annual_income - 1.5 * povertyLine);
+    const idrMonthly = discretionary * 0.10 / 12;
+    const idr = simulateIdr(loan_amount, rate, idrMonthly, 240, true);
+    // ── Debt-to-income health check ───────────────────────────────────────────
+    const grossMonthly = annual_income / 12;
+    const stdDti = (stdMonthly / grossMonthly) * 100;
+    const idrDti = (idrMonthly / grossMonthly) * 100;
+    function dtiRating(pct) {
+        if (pct <= 10)
+            return "healthy";
+        if (pct <= 15)
+            return "manageable";
+        if (pct <= 20)
+            return "tight";
+        return "high — consider IDR";
+    }
+    // ── Recommendation ────────────────────────────────────────────────────────
+    let recommendation;
+    if (idrMonthly >= stdMonthly) {
+        recommendation = `Your income is high relative to your debt — standard repayment saves the most in total interest (${fmt(stdInterest)} vs ${fmt(extInterest)} on extended). IDR would actually cost more per month here.`;
+    }
+    else if (idr.forgiven > 0) {
+        const idrSavings = stdTotal - idr.totalPaid;
+        recommendation = `IDR gives you the lowest monthly payment. With $${idr.forgiven.toLocaleString(undefined, { maximumFractionDigits: 0 })} forgiven after 20 years, you'd pay $${idr.totalPaid.toLocaleString(undefined, { maximumFractionDigits: 0 })} total — ${idrSavings > 0 ? `saving $${idrSavings.toLocaleString(undefined, { maximumFractionDigits: 0 })} vs standard` : `$${Math.abs(idrSavings).toLocaleString(undefined, { maximumFractionDigits: 0 })} more than standard but with lower monthly burden`}. Note: forgiven amounts may be taxable.`;
+    }
+    else {
+        recommendation = `IDR pays off in ${idr.paidOffMonth} months (~${(idr.paidOffMonth / 12).toFixed(1)} years) — faster than standard because your income-driven payment exceeds standard. Standard repayment is equally good and simpler.`;
+    }
+    const lines = [
+        `## Loan Repayment Estimate`,
+        `**Loan:** $${loan_amount.toLocaleString()} at ${interest_rate}% interest`,
+        `**Income:** $${annual_income.toLocaleString()}/yr · Household size: ${household_size}`,
+        ``,
+        `### Standard Repayment (10 years)`,
+        `Monthly payment:   $${stdMonthly.toFixed(2)}  (${stdDti.toFixed(1)}% of gross income — ${dtiRating(stdDti)})`,
+        `Total paid:        $${stdTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+        `Total interest:    $${stdInterest.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+        ``,
+        `### Extended Repayment (25 years)`,
+        `Monthly payment:   $${extMonthly.toFixed(2)}`,
+        `Total paid:        $${extTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+        `Total interest:    $${extInterest.toLocaleString(undefined, { maximumFractionDigits: 0 })}  (+$${(extInterest - stdInterest).toLocaleString(undefined, { maximumFractionDigits: 0 })} vs standard)`,
+        ``,
+        `### Income-Driven Repayment (IDR, 20-year forgiveness)`,
+        `Discretionary income: $${discretionary.toLocaleString(undefined, { maximumFractionDigits: 0 })}/yr  (income − 150% of federal poverty line)`,
+        `Monthly payment:   $${idrMonthly.toFixed(2)}  (${idrDti.toFixed(1)}% of gross income — ${dtiRating(idrDti)})`,
+        idr.paidOffMonth
+            ? `Paid off:          Month ${idr.paidOffMonth} (~${(idr.paidOffMonth / 12).toFixed(1)} years)  |  Total paid: $${idr.totalPaid.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+            : `After 20 years:    $${idr.forgiven.toLocaleString(undefined, { maximumFractionDigits: 0 })} balance forgiven  |  Total paid: $${idr.totalPaid.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+        ``,
+        `### Recommendation`,
+        recommendation,
+        ``,
+        `*IDR plan rules (SAVE/IBR/PAYE) change frequently — verify current terms at studentaid.gov.*`,
+    ];
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+});
 // ── get_college_details ───────────────────────────────────────────────────────
 const DETAIL_FIELDS = [
     "school.name", "school.city", "school.state", "school.school_url",
