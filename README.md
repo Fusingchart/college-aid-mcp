@@ -13,10 +13,18 @@ An MCP server that combines the **US College Scorecard** (Dept of Education) and
 
 **`search_scholarships`** — search 9,500+ scholarships and grants. Filter by keyword, state, study level. Returns award amount, deadline, provider, and direct link.
 
+**`search_by_major`** — compare the same major across schools using program-specific data, not school-wide averages. Supports 60+ major aliases (e.g. `"cs"`, `"nursing"`, `"mechanical engineering"`) or raw 4-digit CIP codes. Returns for each school:
+- Program-specific 4yr median earnings (vs. national benchmark for that program)
+- Program-specific median student debt
+- In-state tuition
+- Sortable by earnings, debt, or tuition
+
 ### Example prompts
 - *"Find CS-focused universities in Washington state with tuition under $15k and show me STEM scholarships I could apply to as a high schooler."*
 - *"Compare median debt vs earnings for the top 10 engineering schools."*
 - *"Find first-generation college student scholarships in California."*
+- *"Rank nursing bachelor programs in Texas by earnings — which schools beat the national median?"*
+- *"Show me mechanical engineering programs sorted by lowest debt in the midwest."*
 
 ---
 
