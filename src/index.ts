@@ -4,7 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { lookupCip } from "./cip-codes.js";
 import { decodeOwnership, decodeLocale, decodeCarnegie, fmt, fmtPct } from "./school-decoders.js";
-import { fetchSchoolsByName, type SchoolRecord } from "./scorecard.js";
+import { fetchSchoolsByName, fetchSimilarSchools, type SchoolRecord } from "./scorecard.js";
+import { CARNEGIE_ADJACENT } from "./school-decoders.js";
 
 const SCORECARD_API_KEY = process.env.COLLEGE_SCORECARD_API_KEY ?? "";
 const CAREERONESTOP_USER_ID = process.env.CAREERONESTOP_USER_ID ?? "";
@@ -570,6 +571,130 @@ server.tool(
       : "";
 
     return { content: [{ type: "text", text: table + notFoundNote }] };
+  }
+);
+
+// ── find_similar_colleges ─────────────────────────────────────────────────────
+
+server.tool(
+  "find_similar_colleges",
+  "Given a reference school, find reach, target, and safety alternatives with similar Carnegie classification. Filters by admission rate windows around the reference school's selectivity, then sorts each bucket by earnings or tuition. Great for building a realistic college list.",
+  {
+    school: z.string().describe("Reference school name, e.g. 'University of Washington', 'Georgia Tech'"),
+    goal: z
+      .enum(["higher_earnings", "lower_cost", "closest_match"])
+      .default("closest_match")
+      .describe("How to sort results within each bucket: highest earnings, lowest in-state tuition, or closest admission rate"),
+    buckets: z
+      .array(z.enum(["reach", "target", "safety"]))
+      .default(["reach", "target", "safety"])
+      .describe("Which buckets to include"),
+    results_per_bucket: z.number().min(1).max(5).default(3).describe("Schools to return per bucket"),
+  },
+  async ({ school, goal, buckets, results_per_bucket }) => {
+    if (!SCORECARD_API_KEY) {
+      return { content: [{ type: "text", text: "Missing COLLEGE_SCORECARD_API_KEY. Get a free key at https://api.data.gov/signup/" }] };
+    }
+
+    // Step 1: fetch reference school
+    const refs = await fetchSchoolsByName(school, SCORECARD_API_KEY, 1);
+    if (refs.length === 0) {
+      return { content: [{ type: "text", text: `No school found matching "${school}".` }] };
+    }
+    const ref = refs[0];
+    const refName   = String(ref["school.name"] ?? school);
+    const refAdmit  = ref["latest.admissions.admission_rate.overall"] as number | null;
+    const refCarnegie = ref["school.carnegie_basic"] as number | null;
+
+    if (refAdmit == null) {
+      return { content: [{ type: "text", text: `${refName} doesn't report an admission rate — can't build reach/target/safety buckets.` }] };
+    }
+
+    const carnegieCode  = refCarnegie ?? 15;
+    const adjacentCodes = CARNEGIE_ADJACENT[carnegieCode] ?? [carnegieCode];
+
+    // Admission rate windows (clamped to [0.01, 0.99])
+    const clamp = (v: number) => Math.min(0.99, Math.max(0.01, v));
+    const windows = {
+      reach:  { min: clamp(0.01),               max: clamp(refAdmit - 0.05), sort: "admit_desc" as const },
+      target: { min: clamp(refAdmit - 0.07),    max: clamp(refAdmit + 0.07), sort: "admit_asc"  as const },
+      safety: { min: clamp(refAdmit + 0.05),    max: clamp(0.99),            sort: "admit_asc"  as const },
+    };
+
+    const sortBy = goal === "higher_earnings" ? "earnings_desc" as const
+                 : goal === "lower_cost"      ? "tuition_asc"   as const
+                 : undefined; // use window default
+
+    // Step 2: run all requested bucket queries in parallel, try primary Carnegie then adjacent
+    const bucketResults = await Promise.all(
+      (buckets as Array<"reach" | "target" | "safety">).map(async (bucket) => {
+        const win = windows[bucket];
+        const effectiveSort = sortBy ?? win.sort;
+
+        // Try exact Carnegie first, fall back to adjacent if too few results
+        let results: SchoolRecord[] = [];
+        for (const code of adjacentCodes) {
+          results = await fetchSimilarSchools({
+            apiKey: SCORECARD_API_KEY,
+            admitRateMin: win.min,
+            admitRateMax: win.max,
+            carnegieCode: code,
+            excludeId: refName,
+            sortBy: effectiveSort,
+            perPage: results_per_bucket + 2, // fetch a few extra to allow dedup
+          });
+          if (results.length >= results_per_bucket) break;
+        }
+
+        // Exclude the reference school by name
+        const filtered = results.filter(
+          (r) => String(r["school.name"] ?? "").toLowerCase() !== refName.toLowerCase()
+        );
+
+        return { bucket, results: filtered.slice(0, results_per_bucket) };
+      })
+    );
+
+    // Step 3: format output
+    const refAdmitPct = (refAdmit * 100).toFixed(1);
+    const lines: string[] = [
+      `## Similar colleges to ${refName}`,
+      `Reference: **${refAdmitPct}% acceptance rate** · ${decodeCarnegie(carnegieCode)}`,
+      "",
+    ];
+
+    const bucketLabels: Record<string, string> = {
+      reach:  `### Reach  _(more selective than ${refAdmitPct}%)_`,
+      target: `### Target  _(similar selectivity ±7%)_`,
+      safety: `### Safety  _(less selective than ${refAdmitPct}%)_`,
+    };
+
+    for (const { bucket, results } of bucketResults) {
+      lines.push(bucketLabels[bucket]);
+      if (results.length === 0) {
+        lines.push(`_No ${bucket} schools found with similar Carnegie classification._`);
+      } else {
+        for (const r of results) {
+          const admit   = r["latest.admissions.admission_rate.overall"] as number | null;
+          const tuition = r["latest.cost.tuition.in_state"] as number | null;
+          const debt    = r["latest.aid.median_debt.completers.overall"] as number | null;
+          const earn    = r["latest.earnings.10_yrs_after_entry.median"] as number | null;
+          const grad    = r["latest.completion.completion_rate_4yr_150nt"] as number | null;
+
+          lines.push(
+            `**${r["school.name"]}** — ${r["school.city"]}, ${r["school.state"]}`,
+            `  Accept: ${admit != null ? `${(admit * 100).toFixed(1)}%` : "N/A"} · ` +
+            `In-state tuition: ${fmt(tuition)} · ` +
+            `Median debt: ${fmt(debt)}`,
+            `  10yr earnings: ${fmt(earn)} · ` +
+            `Grad rate: ${fmtPct(grad)}`,
+          );
+        }
+      }
+      lines.push("");
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
 
