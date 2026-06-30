@@ -14,6 +14,145 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+// ── CareerOneStop helpers ─────────────────────────────────────────────────────
+
+function cosHeaders() {
+  return {
+    Authorization: `Bearer ${CAREERONESTOP_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+}
+
+type WageEntry = {
+  RateType: string;
+  Pct10: number | null;
+  Pct25: number | null;
+  Median: number | null;
+  Pct75: number | null;
+  Pct90: number | null;
+  AreaName: string;
+};
+
+type OccupationDetail = {
+  OnetTitle?: string;
+  OnetCode?: string;
+  OnetDescription?: string;
+  BrightOutlook?: boolean | string;
+  Wages?: {
+    NationalWagesList?: WageEntry[];
+    StateWagesList?: WageEntry[];
+  };
+  EducationTraining?: {
+    EducationType?: { EducationLevel?: string; Percentage?: number }[];
+  };
+  Tasks?: { TaskDescription?: string }[];
+};
+
+async function fetchOccupationDetail(socCode: string, location: string): Promise<OccupationDetail | null> {
+  const url = `https://api.careeronestop.org/v1/occupationdetails/${CAREERONESTOP_USER_ID}/${encodeURIComponent(socCode)}/${location}`;
+  const res = await fetch(url, { headers: cosHeaders() });
+  if (!res.ok) return null;
+  return res.json() as Promise<OccupationDetail>;
+}
+
+function annualWages(list: WageEntry[] | undefined): WageEntry | null {
+  return list?.find((w) => w.RateType?.toLowerCase() === "annual") ?? null;
+}
+
+function fmtWage(n: number | null | undefined): string {
+  if (n == null) return "N/A";
+  return `$${Number(n).toLocaleString()}`;
+}
+
+function brightLabel(v: boolean | string | undefined): string {
+  if (v == null) return "";
+  if (v === true || String(v).toLowerCase() === "true" || String(v).toLowerCase() === "yes") return " ✦ Bright Outlook";
+  return "";
+}
+
+// ── search_careers ────────────────────────────────────────────────────────────
+
+server.tool(
+  "search_careers",
+  "Search careers by job title or keyword. Returns salary percentiles (P25/median/P75/P90), bright job outlook flag, typical education required, and top job tasks — all from CareerOneStop/O*NET. Pairs with estimate_loan_repayment to connect college debt to realistic post-graduation salaries.",
+  {
+    keyword: z.string().describe("Job title or career keyword, e.g. 'software engineer', 'registered nurse', 'data analyst', 'mechanical engineer'"),
+    state: z.string().optional().describe("Two-letter state code for location-specific wages, e.g. 'WA'. Omit for national data."),
+    limit: z.number().min(1).max(5).default(3).describe("Number of occupations to return (max 5)"),
+  },
+  async ({ keyword, state, limit }) => {
+    if (!CAREERONESTOP_USER_ID || !CAREERONESTOP_TOKEN) {
+      return {
+        content: [{ type: "text", text: "Missing CAREERONESTOP_USER_ID or CAREERONESTOP_TOKEN. Register free at https://api.careeronestop.org/api-explorer/" }],
+      };
+    }
+
+    const location = state ?? "";
+    const searchUrl = `https://api.careeronestop.org/v1/occupation/${CAREERONESTOP_USER_ID}/${encodeURIComponent(keyword)}/${location}/true/${limit}`;
+    const searchRes = await fetch(searchUrl, { headers: cosHeaders() });
+
+    if (!searchRes.ok) {
+      return { content: [{ type: "text", text: `CareerOneStop search error: ${searchRes.status} ${searchRes.statusText}` }] };
+    }
+
+    const searchData = (await searchRes.json()) as {
+      OccupationList?: { OnetTitle: string; OnetCode: string }[];
+    };
+
+    const occupations = searchData.OccupationList ?? [];
+
+    if (occupations.length === 0) {
+      return { content: [{ type: "text", text: `No occupations found for "${keyword}". Try a different job title or keyword.` }] };
+    }
+
+    // Fetch details for all matches in parallel
+    const details = await Promise.all(
+      occupations.slice(0, limit).map((occ) => fetchOccupationDetail(occ.OnetCode, location))
+    );
+
+    const sections = details
+      .map((detail, i) => {
+        const occ = occupations[i];
+        if (!detail) return `### ${occ.OnetTitle}\n  (Details unavailable)`;
+
+        const national = annualWages(detail.Wages?.NationalWagesList);
+        const stateWage = state ? annualWages(detail.Wages?.StateWagesList) : null;
+
+        const descSnippet = detail.OnetDescription
+          ? String(detail.OnetDescription).slice(0, 220) + (String(detail.OnetDescription).length > 220 ? "…" : "")
+          : "";
+
+        // Top education requirement (highest % or most common)
+        const edTypes = detail.EducationTraining?.EducationType ?? [];
+        const topEd = edTypes.sort((a, b) => (b.Percentage ?? 0) - (a.Percentage ?? 0))[0];
+        const edStr = topEd?.EducationLevel ?? "N/A";
+
+        // Top 3 tasks
+        const tasks = (detail.Tasks ?? []).slice(0, 3).map((t) => `  - ${t.TaskDescription}`).join("\n");
+
+        const lines = [
+          `### ${detail.OnetTitle ?? occ.OnetTitle}${brightLabel(detail.BrightOutlook)}`,
+          `SOC: ${detail.OnetCode ?? occ.OnetCode}`,
+          descSnippet ? `\n${descSnippet}` : "",
+          `\n**National salary (annual)**`,
+          `  P25: ${fmtWage(national?.Pct25)}  |  Median: ${fmtWage(national?.Median)}  |  P75: ${fmtWage(national?.Pct75)}  |  P90: ${fmtWage(national?.Pct90)}`,
+        ];
+
+        if (stateWage) {
+          lines.push(`**${state} salary (annual)**`);
+          lines.push(`  P25: ${fmtWage(stateWage.Pct25)}  |  Median: ${fmtWage(stateWage.Median)}  |  P75: ${fmtWage(stateWage.Pct75)}  |  P90: ${fmtWage(stateWage.Pct90)}`);
+        }
+
+        lines.push(`\nTypical education: ${edStr}`);
+        if (tasks) { lines.push(`\nKey tasks:\n${tasks}`); }
+
+        return lines.filter(Boolean).join("\n");
+      });
+
+    return { content: [{ type: "text", text: sections.join("\n\n---\n\n") }] };
+  }
+);
+
 // ── College Scorecard ─────────────────────────────────────────────────────────
 
 server.tool(
