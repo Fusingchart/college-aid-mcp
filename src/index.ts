@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { lookupCip } from "./cip-codes.js";
+import { decodeOwnership, decodeLocale, decodeCarnegie, fmt, fmtPct } from "./school-decoders.js";
 
 const SCORECARD_API_KEY = process.env.COLLEGE_SCORECARD_API_KEY ?? "";
 const CAREERONESTOP_USER_ID = process.env.CAREERONESTOP_USER_ID ?? "";
@@ -201,6 +202,150 @@ server.tool(
     return {
       content: [{ type: "text", text: formatted.join("\n\n") }],
     };
+  }
+);
+
+// ── get_college_details ───────────────────────────────────────────────────────
+
+const DETAIL_FIELDS = [
+  "school.name", "school.city", "school.state", "school.school_url",
+  "school.ownership", "school.locale", "school.carnegie_basic",
+  "school.degrees_awarded.predominant", "school.religious_affiliation",
+  // Admissions
+  "latest.admissions.admission_rate.overall",
+  "latest.admissions.sat_scores.25th_percentile.math",
+  "latest.admissions.sat_scores.75th_percentile.math",
+  "latest.admissions.sat_scores.25th_percentile.critical_reading",
+  "latest.admissions.sat_scores.75th_percentile.critical_reading",
+  "latest.admissions.act_scores.25th_percentile.cumulative",
+  "latest.admissions.act_scores.75th_percentile.cumulative",
+  // Students
+  "latest.student.size",
+  "latest.student.retention_rate.four_year.full_time",
+  "latest.student.demographics.first_generation",
+  // Costs
+  "latest.cost.tuition.in_state",
+  "latest.cost.tuition.out_of_state",
+  "latest.cost.avg_net_price.consumer.overall_median",
+  "latest.cost.net_price.consumer.by_income_level.0-30000",
+  "latest.cost.net_price.consumer.by_income_level.30001-48000",
+  "latest.cost.net_price.consumer.by_income_level.48001-75000",
+  "latest.cost.net_price.consumer.by_income_level.75001-110000",
+  "latest.cost.net_price.consumer.by_income_level.110001-plus",
+  // Aid & debt
+  "latest.aid.pell_grant_rate",
+  "latest.aid.federal_loan_rate",
+  "latest.aid.median_debt.completers.overall",
+  // Outcomes
+  "latest.completion.completion_rate_4yr_150nt",
+  "latest.earnings.10_yrs_after_entry.median",
+].join(",");
+
+server.tool(
+  "get_college_details",
+  "Deep dive on a single school: net price broken down by family income bracket, SAT/ACT score ranges, retention rate, first-generation student share, financial aid stats, and 10-year earnings. Much more detail than search_colleges.",
+  {
+    name: z.string().describe("School name to look up, e.g. 'MIT', 'University of Washington', 'Georgia Tech'"),
+  },
+  async ({ name }) => {
+    if (!SCORECARD_API_KEY) {
+      return {
+        content: [{ type: "text", text: "Missing COLLEGE_SCORECARD_API_KEY. Get a free key at https://api.data.gov/signup/" }],
+      };
+    }
+
+    const params = new URLSearchParams({
+      api_key: SCORECARD_API_KEY,
+      "school.name": name,
+      fields: DETAIL_FIELDS,
+      per_page: "5",
+    });
+
+    const res = await fetch(`https://api.data.gov/ed/collegescorecard/v1/schools?${params}`);
+    if (!res.ok) {
+      return { content: [{ type: "text", text: `College Scorecard API error: ${res.status} ${res.statusText}` }] };
+    }
+
+    const data = (await res.json()) as { results: Record<string, unknown>[] };
+    const results = data.results ?? [];
+
+    if (results.length === 0) {
+      return { content: [{ type: "text", text: `No school found matching "${name}". Try a more specific name.` }] };
+    }
+
+    // If multiple matches, show disambiguation list
+    if (results.length > 1) {
+      const options = results
+        .map((r, i) => `${i + 1}. ${r["school.name"]} — ${r["school.city"]}, ${r["school.state"]}`)
+        .join("\n");
+      return {
+        content: [{ type: "text", text: `Multiple matches for "${name}". Please be more specific:\n\n${options}` }],
+      };
+    }
+
+    const r = results[0];
+    const g = (key: string) => r[key] ?? null;
+
+    // SAT composite (math + reading midpoints)
+    const sat25m = g("latest.admissions.sat_scores.25th_percentile.math");
+    const sat75m = g("latest.admissions.sat_scores.75th_percentile.math");
+    const sat25r = g("latest.admissions.sat_scores.25th_percentile.critical_reading");
+    const sat75r = g("latest.admissions.sat_scores.75th_percentile.critical_reading");
+    const satStr = sat25m != null && sat25r != null
+      ? `${Number(sat25m) + Number(sat25r)}–${Number(sat75m!) + Number(sat75r!)} (Math: ${sat25m}–${sat75m} | Reading: ${sat25r}–${sat75r})`
+      : "Not reported (test-optional or not available)";
+
+    const act25 = g("latest.admissions.act_scores.25th_percentile.cumulative");
+    const act75 = g("latest.admissions.act_scores.75th_percentile.cumulative");
+    const actStr = act25 != null ? `${act25}–${act75}` : "Not reported";
+
+    const np0  = g("latest.cost.net_price.consumer.by_income_level.0-30000");
+    const np30 = g("latest.cost.net_price.consumer.by_income_level.30001-48000");
+    const np48 = g("latest.cost.net_price.consumer.by_income_level.48001-75000");
+    const np75 = g("latest.cost.net_price.consumer.by_income_level.75001-110000");
+    const np110 = g("latest.cost.net_price.consumer.by_income_level.110001-plus");
+
+    const netPriceTable = [
+      `  $0 – $30k family income:      ${fmt(np0 as number)}`,
+      `  $30k – $48k family income:    ${fmt(np30 as number)}`,
+      `  $48k – $75k family income:    ${fmt(np48 as number)}`,
+      `  $75k – $110k family income:   ${fmt(np75 as number)}`,
+      `  $110k+ family income:         ${fmt(np110 as number)}`,
+    ].join("\n");
+
+    const sections = [
+      `# ${g("school.name")}`,
+      `${g("school.city")}, ${g("school.state")} · ${g("school.school_url") ?? ""}`,
+      `${decodeOwnership(g("school.ownership") as number)} · ${decodeLocale(g("school.locale") as number)} · ${decodeCarnegie(g("school.carnegie_basic") as number)}`,
+
+      `\n## Admissions`,
+      `Acceptance rate:   ${fmtPct(g("latest.admissions.admission_rate.overall") as number)}`,
+      `SAT range (25–75): ${satStr}`,
+      `ACT range (25–75): ${actStr}`,
+
+      `\n## Students`,
+      `Enrollment:        ${g("latest.student.size") != null ? Number(g("latest.student.size")).toLocaleString() : "N/A"}`,
+      `1st-year retention: ${fmtPct(g("latest.student.retention_rate.four_year.full_time") as number)}`,
+      `4-year grad rate:  ${fmtPct(g("latest.completion.completion_rate_4yr_150nt") as number)}`,
+      `First-gen students: ${fmtPct(g("latest.student.demographics.first_generation") as number)}`,
+
+      `\n## Cost`,
+      `In-state tuition:  ${fmt(g("latest.cost.tuition.in_state") as number)}`,
+      `Out-of-state:      ${fmt(g("latest.cost.tuition.out_of_state") as number)}`,
+      `Avg net price:     ${fmt(g("latest.cost.avg_net_price.consumer.overall_median") as number)}`,
+      `\nNet price by family income (after all aid):`,
+      netPriceTable,
+
+      `\n## Financial Aid`,
+      `Pell grant recipients: ${fmtPct(g("latest.aid.pell_grant_rate") as number)}`,
+      `Students with federal loans: ${fmtPct(g("latest.aid.federal_loan_rate") as number)}`,
+      `Median debt at graduation: ${fmt(g("latest.aid.median_debt.completers.overall") as number)}`,
+
+      `\n## Outcomes`,
+      `Median earnings 10 yrs after entry: ${fmt(g("latest.earnings.10_yrs_after_entry.median") as number)}`,
+    ];
+
+    return { content: [{ type: "text", text: sections.join("\n") }] };
   }
 );
 
