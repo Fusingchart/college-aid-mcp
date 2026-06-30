@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { lookupCip } from "./cip-codes.js";
 import { decodeOwnership, decodeLocale, decodeCarnegie, fmt, fmtPct } from "./school-decoders.js";
+import { fetchSchoolsByName } from "./scorecard.js";
 const SCORECARD_API_KEY = process.env.COLLEGE_SCORECARD_API_KEY ?? "";
 const CAREERONESTOP_USER_ID = process.env.CAREERONESTOP_USER_ID ?? "";
 const CAREERONESTOP_TOKEN = process.env.CAREERONESTOP_TOKEN ?? "";
@@ -368,39 +369,6 @@ server.tool("estimate_loan_repayment", "Calculate monthly payments, total intere
     return { content: [{ type: "text", text: lines.join("\n") }] };
 });
 // ── get_college_details ───────────────────────────────────────────────────────
-const DETAIL_FIELDS = [
-    "school.name", "school.city", "school.state", "school.school_url",
-    "school.ownership", "school.locale", "school.carnegie_basic",
-    "school.degrees_awarded.predominant", "school.religious_affiliation",
-    // Admissions
-    "latest.admissions.admission_rate.overall",
-    "latest.admissions.sat_scores.25th_percentile.math",
-    "latest.admissions.sat_scores.75th_percentile.math",
-    "latest.admissions.sat_scores.25th_percentile.critical_reading",
-    "latest.admissions.sat_scores.75th_percentile.critical_reading",
-    "latest.admissions.act_scores.25th_percentile.cumulative",
-    "latest.admissions.act_scores.75th_percentile.cumulative",
-    // Students
-    "latest.student.size",
-    "latest.student.retention_rate.four_year.full_time",
-    "latest.student.demographics.first_generation",
-    // Costs
-    "latest.cost.tuition.in_state",
-    "latest.cost.tuition.out_of_state",
-    "latest.cost.avg_net_price.consumer.overall_median",
-    "latest.cost.net_price.consumer.by_income_level.0-30000",
-    "latest.cost.net_price.consumer.by_income_level.30001-48000",
-    "latest.cost.net_price.consumer.by_income_level.48001-75000",
-    "latest.cost.net_price.consumer.by_income_level.75001-110000",
-    "latest.cost.net_price.consumer.by_income_level.110001-plus",
-    // Aid & debt
-    "latest.aid.pell_grant_rate",
-    "latest.aid.federal_loan_rate",
-    "latest.aid.median_debt.completers.overall",
-    // Outcomes
-    "latest.completion.completion_rate_4yr_150nt",
-    "latest.earnings.10_yrs_after_entry.median",
-].join(",");
 server.tool("get_college_details", "Deep dive on a single school: net price broken down by family income bracket, SAT/ACT score ranges, retention rate, first-generation student share, financial aid stats, and 10-year earnings. Much more detail than search_colleges.", {
     name: z.string().describe("School name to look up, e.g. 'MIT', 'University of Washington', 'Georgia Tech'"),
 }, async ({ name }) => {
@@ -409,18 +377,7 @@ server.tool("get_college_details", "Deep dive on a single school: net price brok
             content: [{ type: "text", text: "Missing COLLEGE_SCORECARD_API_KEY. Get a free key at https://api.data.gov/signup/" }],
         };
     }
-    const params = new URLSearchParams({
-        api_key: SCORECARD_API_KEY,
-        "school.name": name,
-        fields: DETAIL_FIELDS,
-        per_page: "5",
-    });
-    const res = await fetch(`https://api.data.gov/ed/collegescorecard/v1/schools?${params}`);
-    if (!res.ok) {
-        return { content: [{ type: "text", text: `College Scorecard API error: ${res.status} ${res.statusText}` }] };
-    }
-    const data = (await res.json());
-    const results = data.results ?? [];
+    const results = await fetchSchoolsByName(name, SCORECARD_API_KEY, 5);
     if (results.length === 0) {
         return { content: [{ type: "text", text: `No school found matching "${name}". Try a more specific name.` }] };
     }
